@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
+import { PHOTO_SIZE_PRESETS, findPresetById, matchPresetByRatio, presetContentRatio } from '@/data/photoSizes';
+import { contentRatio as calcContentRatio, contentSize } from '@/utils/frameGeometry';
+import { applyPresetToWindow } from '@/utils/windowSize';
+import type { FrameSizeOrientation } from '@/types';
 
 const props = defineProps<{
   frameStyle: 'wood' | 'metal' | 'minimal';
@@ -109,6 +113,91 @@ const frameStyles = [
   { id: 'metal', name: '杰伦', icon: '🎤' },
   { id: 'minimal', name: '纯白', icon: '◇' },
 ];
+
+/* ==================== 常规相框尺寸 ==================== */
+
+const photoSizes = PHOTO_SIZE_PRESETS;
+const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+
+const frameOrientations: { id: FrameSizeOrientation; name: string }[] = [
+  { id: 'landscape', name: '横向' },
+  { id: 'portrait', name: '纵向' },
+];
+
+const frameSize = computed(() => settingsStore.settings.frameSize);
+
+/** 当前窗口照片内容区的宽高比；浏览器环境为 null */
+const currentContentRatio = computed(() => {
+  const viewport = settingsStore.frameViewport;
+  if (!viewport) return null;
+  return calcContentRatio(viewport.width, viewport.height, props.frameStyle);
+});
+
+/**
+ * 实际匹配到的预设，null = 自定义。
+ * 由**实时比例**推导而不是由存的 presetId 推导，所以解锁后手动拉到偏离比例时，
+ * 预设高亮会自动消失并出现「自定义」。
+ */
+const effectivePresetId = computed(() => {
+  const ratio = currentContentRatio.value;
+  if (ratio === null) return frameSize.value.presetId; // 浏览器环境退回已存意图
+  return matchPresetByRatio(ratio, frameSize.value.orientation)?.id ?? null;
+});
+
+/** 屏幕装不下所选比例时的提示文案 */
+const sizeHint = ref('');
+
+async function applyPreset(
+  presetId: string,
+  orientation: FrameSizeOrientation,
+  baseContentWidth?: number | null,
+) {
+  const result = await applyPresetToWindow(presetId, orientation, props.frameStyle, baseContentWidth);
+  const preset = findPresetById(presetId);
+  sizeHint.value =
+    result?.ratioBroken && preset
+      ? `${preset.name}${orientation === 'portrait' ? '纵向' : '横向'}比屏幕可用高度还大，为保持比例窗口会超出屏幕`
+      : '';
+}
+
+const selectSize = (presetId: string) => {
+  sizeHint.value = '';
+  settingsStore.setFrameSizePreset(presetId);
+  void applyPreset(presetId, frameSize.value.orientation);
+};
+
+/** 切换横/纵：保持内容区长边长度不变，只交换长边的方向 */
+const frameOrientation = computed({
+  get: () => frameSize.value.orientation,
+  set: (orientation: FrameSizeOrientation) => {
+    settingsStore.setFrameSizeOrientation(orientation);
+    const presetId = frameSize.value.presetId;
+    const preset = findPresetById(presetId);
+    if (!presetId || !preset) return;
+    const viewport = settingsStore.frameViewport;
+    let baseContentWidth: number | null = null;
+    if (viewport) {
+      const content = contentSize(viewport.width, viewport.height, props.frameStyle);
+      const longEdge = Math.max(content.width, content.height);
+      baseContentWidth = longEdge * presetContentRatio(preset, orientation);
+    }
+    void applyPreset(presetId, orientation, baseContentWidth);
+  },
+});
+
+const frameLockAspect = computed({
+  get: () => frameSize.value.lockAspect,
+  set: (lockAspect: boolean) => {
+    if (lockAspect) {
+      // 开启瞬间按"当前屏幕上的实际比例"反查预设，也就是"锁住你现在看到的"
+      const ratio = currentContentRatio.value;
+      if (ratio !== null) {
+        settingsStore.setFrameSizePreset(matchPresetByRatio(ratio, frameSize.value.orientation)?.id ?? null);
+      }
+    }
+    settingsStore.setFrameLockAspect(lockAspect);
+  },
+});
 </script>
 
 <template>
@@ -159,6 +248,70 @@ const frameStyles = [
           <span class="text-xs text-gray-200">{{ style.name }}</span>
         </button>
       </div>
+    </div>
+
+    <!-- 常规相框尺寸（控制整个应用窗口的尺寸） -->
+    <div class="space-y-2">
+      <label class="text-gray-300 text-sm">常规相框尺寸</label>
+
+      <!-- 横向 / 纵向 -->
+      <div class="grid grid-cols-2 gap-2">
+        <button
+          v-for="orientation in frameOrientations"
+          :key="orientation.id"
+          @click="frameOrientation = orientation.id"
+          class="px-3 py-2 text-sm rounded bg-gray-700 hover:bg-gray-600 transition-colors text-white"
+          :class="{ 'ring-1 ring-blue-500': frameSize.orientation === orientation.id }"
+        >
+          {{ orientation.name }}
+        </button>
+      </div>
+
+      <!-- 等比例锁定 -->
+      <div class="flex items-center justify-between">
+        <div>
+          <label class="text-gray-300 text-sm block">等比例锁定</label>
+          <p class="text-gray-300 text-xs">拖动手柄时保持相片比例</p>
+        </div>
+        <button
+          @click="frameLockAspect = !frameLockAspect"
+          class="w-12 h-6 rounded-full transition-colors flex-shrink-0"
+          :class="frameLockAspect ? 'bg-blue-500' : 'bg-gray-600'"
+        >
+          <div
+            class="w-5 h-5 rounded-full bg-white transition-transform"
+            :class="{ 'translate-x-6': frameLockAspect }"
+          ></div>
+        </button>
+      </div>
+
+      <!-- 常见冲印尺寸 -->
+      <div class="grid grid-cols-3 gap-2">
+        <button
+          v-for="size in photoSizes"
+          :key="size.id"
+          @click="selectSize(size.id)"
+          class="p-2 rounded-lg bg-gray-700 hover:bg-gray-600 transition-colors"
+          :class="{ 'ring-2 ring-blue-500': effectivePresetId === size.id }"
+        >
+          <span class="text-xs block text-gray-200">{{ size.name }}</span>
+          <span class="text-[10px] block text-gray-300">
+            {{ size.aliases.length ? size.aliases.join('/') + ' · ' : '' }}{{ size.mmLong }}×{{ size.mmShort }}
+          </span>
+        </button>
+        <div
+          v-if="effectivePresetId === null"
+          class="p-2 rounded-lg bg-gray-700 ring-2 ring-blue-500 text-center"
+        >
+          <span class="text-xs block text-gray-200">自定义</span>
+          <span class="text-[10px] block text-gray-300">
+            {{ currentContentRatio ? '比例 ' + currentContentRatio.toFixed(2) : '自由调整' }}
+          </span>
+        </div>
+      </div>
+
+      <p v-if="sizeHint" class="text-amber-400 text-xs">{{ sizeHint }}</p>
+      <p v-if="!isTauri" class="text-gray-400 text-xs">浏览器预览环境无法调整窗口大小，尺寸在桌面应用中生效</p>
     </div>
 
     <!-- 轮播设置 -->

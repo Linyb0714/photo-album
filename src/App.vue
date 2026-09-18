@@ -4,6 +4,7 @@ import { useAlbumStore } from '@/stores/album';
 import { useSettingsStore } from '@/stores/settings';
 import { selectFolder, readFolder, readMyLoveAlbum, readMyLoveAlbumWeb } from '@/utils/tauriApi';
 import { loadState, debouncedSave, type PersistedState } from '@/utils/persistence';
+import { applyPresetToWindow } from '@/utils/windowSize';
 import type { Photo, Album } from '@/types';
 import { initializeDefaultAlbum } from '@/data/jayChouAlbum';
 import MainMenu from '@/components/Menu/MainMenu.vue';
@@ -135,6 +136,17 @@ watch(
   { deep: true }
 );
 
+// 锁定状态下切换相框风格：边框厚度变了（木质 124 / 杰伦 112 / 纯白 76），
+// 同样的窗口尺寸会得出不同的内容区比例，所以按新内缩重算一次窗口尺寸
+watch(
+  () => settingsStore.settings.frameStyle,
+  async (style) => {
+    const { presetId, orientation, lockAspect } = settingsStore.settings.frameSize;
+    if (!lockAspect || !presetId) return;
+    await applyPresetToWindow(presetId, orientation, style);
+  }
+);
+
 onMounted(async () => {
   updateTime();
   setInterval(updateTime, 1000);
@@ -174,6 +186,19 @@ onMounted(async () => {
 
   // 2. 启用自动保存（后续扫描产生的变更会被持久化）
   isHydrated = true;
+
+  // 2.5 恢复上次选的相框尺寸（相框即窗口边界）。
+  //     必须放在这里而不是 AppFrame 的 onMounted：子组件的 onMounted 早于 hydrate，
+  //     那时读不到持久化的 presetId。
+  const savedFrameSize = settingsStore.settings.frameSize;
+  if (isTauriEnv && savedFrameSize.presetId) {
+    console.log('[App] 📐 恢复相框尺寸:', savedFrameSize.presetId, savedFrameSize.orientation);
+    await applyPresetToWindow(
+      savedFrameSize.presetId,
+      savedFrameSize.orientation,
+      settingsStore.settings.frameStyle,
+    );
+  }
 
   // 3. 确保【爱你❤️】默认相册存在（持久化数据里可能没有，需要补充扫描）
   //    Tauri 环境用后端扫描目录，浏览器环境用 manifest.json

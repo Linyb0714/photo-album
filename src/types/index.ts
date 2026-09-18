@@ -50,6 +50,25 @@ export interface CarouselSettings {
 export type FrameStyle = 'wood' | 'metal' | 'minimal';
 
 /**
+ * 相框（=应用窗口）的横/纵方向。
+ * 注意：与 AppSettings.orientation（按照片 aspectRatio 过滤照片）完全无关，勿混用。
+ */
+export type FrameSizeOrientation = 'landscape' | 'portrait';
+
+/**
+ * 常规相框尺寸：控制**整个应用窗口**的尺寸（本项目里相框边界即窗口边界）。
+ * 比例换算在 src/utils/frameGeometry.ts，预设清单在 src/data/photoSizes.ts。
+ */
+export interface FrameSizeSettings {
+  /** 选中的标准冲印尺寸 id（PHOTO_SIZE_PRESETS[].id）；null = 自定义 */
+  presetId: string | null;
+  /** 横/纵方向，只决定宽高哪边是长边 */
+  orientation: FrameSizeOrientation;
+  /** 等比例锁定：拖拽相框手柄时保持照片内容区的宽高比 */
+  lockAspect: boolean;
+}
+
+/**
  * 照片编辑参数（非破坏性：只存参数，不改动原图，也不生成新文件）
  * 只做影调/色彩调整，**不提供大小与位置的编辑**（照片始终铺满相框）
  */
@@ -95,4 +114,6 @@ export interface AppSettings {
   orientation: 'auto' | 'landscape' | 'portrait';
   /** 竖图展示模式：ken-burns(缓慢纵向滑动) | contain(完整显示) | cover(填满裁剪) */
   portraitFitMode: 'ken-burns' | 'contain' | 'cover';
+  /** 常规相框尺寸（窗口尺寸）。与上面按 aspectRatio 过滤照片的 orientation 无关 */
+  frameSize: FrameSizeSettings;
 }

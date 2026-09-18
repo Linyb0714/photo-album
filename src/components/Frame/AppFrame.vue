@@ -1,9 +1,28 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { useSettingsStore } from '@/stores/settings';
+import { findPresetById, presetContentRatio } from '@/data/photoSizes';
+import {
+  FRAME_INSETS,
+  MIN_WINDOW,
+  clamp,
+  contentRatio as calcContentRatio,
+  contentWidthBounds,
+  type WorkArea,
+} from '@/utils/frameGeometry';
+import {
+  getWindowMetrics,
+  getWorkAreaLogical,
+  setLogicalPosition,
+  setLogicalSize,
+  subscribeViewport,
+} from '@/utils/windowSize';
 
 const props = defineProps<{
   frameStyle: 'wood' | 'metal' | 'minimal';
 }>();
+
+const settingsStore = useSettingsStore();
 
 type Dir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 
@@ -50,19 +69,6 @@ const RESIZE_DIR: Record<Dir, string> = {
   ne: 'NorthEast', nw: 'NorthWest', se: 'SouthEast', sw: 'SouthWest',
 };
 
-/** 拉伸相框边框 = 缩放应用窗口 */
-const startWindowResize = async (e: MouseEvent, dir: Dir) => {
-  e.stopPropagation();
-  if (!isTauri || e.button !== 0) return;
-  e.preventDefault();
-  try {
-    const win = await tauriWindow();
-    await win.startResizeDragging(RESIZE_DIR[dir] as any);
-  } catch (err) {
-    console.error('[AppFrame] 缩放窗口失败:', err);
-  }
-};
-
 /** 按在相框边框/卡纸/铭牌上才生效，按在内容区交给内容自己处理 */
 const onFrameMouseDown = (e: MouseEvent) => {
   const target = e.target as HTMLElement | null;
@@ -70,13 +76,200 @@ const onFrameMouseDown = (e: MouseEvent) => {
   startWindowDrag(e);
 };
 
-onMounted(() => {
+/* ==================== 缩放窗口（自己接管拖动） ====================
+ * Tauri 的原生 startResizeDragging 不支持锁定宽高比，所以 8 个把手改成自己算：
+ * 用 pointer capture 跟踪光标 → 每帧算一次目标尺寸 → setSize（必要时再 setPosition）。
+ * 锁定关闭时走同一条路径，只是不做比例约束。
+ * 用 pointer events 而不是 window.mousemove：向内快拖时窗口会缩小、光标会跑到
+ * WebView 外面，普通 mousemove 会丢事件，pointer capture 不会。
+ */
+
+interface ResizeDrag {
+  dir: Dir;
+  pointerId: number;
+  /** 按下时的光标位置（CSS px） */
+  startMouse: { x: number; y: number };
+  /** 按下时的窗口逻辑尺寸 */
+  startWin: { w: number; h: number };
+  /** 按下时的窗口逻辑位置（用于锚定对边） */
+  startPos: { x: number; y: number };
+  workArea: WorkArea | null;
+  /** 锁定时的照片内容区宽高比；null = 自由缩放 */
+  lockRatio: number | null;
+  lastApplied: { w: number; h: number } | null;
+  /** 最新光标位置；applyResize 消费掉后就说明该位置已处理 */
+  pending: { x: number; y: number } | null;
+  raf: number | null;
+  /** 有 setSize/setPosition 在飞，避免 IPC 堆积 */
+  busy: boolean;
+}
+
+let drag: ResizeDrag | null = null;
+let unlistenViewport: (() => void) | null = null;
+// 权限没生效时只提示一次，避免每帧刷屏
+let setSizeDenied = false;
+
+function scheduleFrame() {
+  if (!drag || drag.raf !== null || drag.busy) return;
+  drag.raf = requestAnimationFrame(() => {
+    void applyResize();
+  });
+}
+
+async function applyResize() {
+  const d = drag;
+  if (!d || !d.pending || d.busy) return;
+  d.raf = null;
+  // 权限已判定不可用时不再尝试，避免每帧都抛异常
+  if (setSizeDenied) return;
+  const pointer = d.pending;
+  d.busy = true;
+
+  try {
+    const dx = pointer.x - d.startMouse.x;
+    const dy = pointer.y - d.startMouse.y;
+    const inset = FRAME_INSETS[props.frameStyle];
+
+    const horizontal = d.dir.includes('e') || d.dir.includes('w');
+    const vertical = d.dir.includes('n') || d.dir.includes('s');
+
+    let width = d.startWin.w + (d.dir.includes('e') ? dx : d.dir.includes('w') ? -dx : 0);
+    let height = d.startWin.h + (d.dir.includes('s') ? dy : d.dir.includes('n') ? -dy : 0);
+
+    if (d.lockRatio) {
+      // 角手柄由位移更大的那条轴驱动，否则"几乎垂直地拖角"会感觉没反应
+      const widthDriven = horizontal && vertical ? Math.abs(dx) >= Math.abs(dy) : horizontal;
+      const bounds = contentWidthBounds(d.lockRatio, props.frameStyle, MIN_WINDOW, d.workArea);
+      let contentW = widthDriven ? width - inset.x : (height - inset.y) * d.lockRatio;
+      // 屏幕装不下这个比例时按 minCw 走，严格保比例（窗口可能超出屏幕）
+      contentW = bounds.fits ? clamp(contentW, bounds.minCw, bounds.maxCw) : bounds.minCw;
+      width = Math.round(contentW + inset.x);
+      height = Math.round(contentW / d.lockRatio + inset.y);
+    } else {
+      // 先自己钳到最小值，绝不把小于最小值的尺寸交给系统 ——
+      // 否则系统的 minWidth/minHeight 会介入并破坏"锚定对边"
+      width = Math.max(MIN_WINDOW.width, Math.round(width));
+      height = Math.max(MIN_WINDOW.height, Math.round(height));
+      if (d.workArea) {
+        width = Math.min(width, Math.round(d.workArea.width));
+        height = Math.min(height, Math.round(d.workArea.height));
+      }
+    }
+
+    if (!d.lastApplied || d.lastApplied.w !== width || d.lastApplied.h !== height) {
+      // w / n 方向要同时移动窗口，才能让对边钉住不动
+      let x = d.startPos.x;
+      let y = d.startPos.y;
+      if (d.dir.includes('w')) x = d.startPos.x + (d.startWin.w - width);
+      if (d.dir.includes('n')) y = d.startPos.y + (d.startWin.h - height);
+
+      await setLogicalSize(width, height);
+      if (x !== d.startPos.x || y !== d.startPos.y) await setLogicalPosition(x, y);
+      d.lastApplied = { w: width, h: height };
+    }
+  } catch (err) {
+    if (!setSizeDenied) {
+      setSizeDenied = true;
+      console.error('[AppFrame] 缩放窗口失败，已停用自接管缩放:', err);
+      console.warn('[AppFrame] 请确认 capabilities/default.json 含 core:window:allow-set-size');
+      // 自由缩放模式下回退到系统原生缩放（那个权限本来就有）
+      if (!d.lockRatio) {
+        try {
+          const win = await tauriWindow();
+          await win.startResizeDragging(RESIZE_DIR[d.dir] as any);
+        } catch (fallbackErr) {
+          console.error('[AppFrame] 原生缩放回退也失败:', fallbackErr);
+        }
+      }
+      onResizeEnd();
+      return;
+    }
+  } finally {
+    d.busy = false;
+    // 拖动期间又来了新位置，补一帧
+    if (drag === d && d.pending !== pointer) scheduleFrame();
+  }
+}
+
+function onResizeMove(e: PointerEvent) {
+  const d = drag;
+  if (!d || e.pointerId !== d.pointerId) return;
+  d.pending = { x: e.clientX, y: e.clientY };
+  scheduleFrame();
+}
+
+function onResizeEnd() {
+  if (drag) {
+    if (drag.raf !== null) cancelAnimationFrame(drag.raf);
+    drag = null;
+  }
+  window.removeEventListener('pointermove', onResizeMove);
+  window.removeEventListener('pointerup', onResizeEnd);
+  window.removeEventListener('pointercancel', onResizeEnd);
+  window.removeEventListener('blur', onResizeEnd);
+}
+
+async function onHandlePointerDown(e: PointerEvent, dir: Dir) {
+  if (!isTauri || e.button !== 0) return;
+  e.preventDefault();
+
+  try {
+    const win = await tauriWindow();
+    // 最大化 / 全屏下 setSize 无效或会搞坏状态
+    if ((await win.isMaximized()) || (await win.isFullscreen())) return;
+
+    const metrics = await getWindowMetrics();
+    if (!metrics) return;
+
+    const { lockAspect, presetId, orientation } = settingsStore.settings.frameSize;
+    let lockRatio: number | null = null;
+    if (lockAspect) {
+      const preset = findPresetById(presetId);
+      // 有预设就锁预设比例；自定义模式则锁住"当下这个比例"
+      lockRatio = preset
+        ? presetContentRatio(preset, orientation)
+        : calcContentRatio(metrics.width, metrics.height, props.frameStyle);
+    }
+
+    drag = {
+      dir,
+      pointerId: e.pointerId,
+      startMouse: { x: e.clientX, y: e.clientY },
+      startWin: { w: metrics.width, h: metrics.height },
+      startPos: { x: metrics.x, y: metrics.y },
+      workArea: await getWorkAreaLogical(),
+      lockRatio,
+      lastApplied: null,
+      pending: null,
+      raf: null,
+      busy: false,
+    };
+
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    window.addEventListener('pointermove', onResizeMove);
+    window.addEventListener('pointerup', onResizeEnd);
+    window.addEventListener('pointercancel', onResizeEnd);
+    window.addEventListener('blur', onResizeEnd);
+  } catch (err) {
+    console.error('[AppFrame] 初始化缩放失败:', err);
+    drag = null;
+  }
+}
+
+onMounted(async () => {
   measure();
   window.addEventListener('resize', measure);
+  // 把窗口实际尺寸同步给 store，供设置面板判断"自定义"
+  unlistenViewport = await subscribeViewport(({ width, height }) => {
+    settingsStore.setFrameViewport(width, height);
+  });
 });
 
 onUnmounted(() => {
   window.removeEventListener('resize', measure);
+  onResizeEnd();
+  unlistenViewport?.();
+  unlistenViewport = null;
 });
 
 </script>
@@ -106,13 +299,14 @@ onUnmounted(() => {
         <span v-if="showSign" class="frame-badge"></span>
         <span v-if="showSign" class="frame-sign">Jay Chou</span>
 
-        <!-- 缩放把手（Tauri 下映射为窗口缩放） -->
+        <!-- 缩放把手（自接管拖动，见 onHandlePointerDown） -->
         <div
           v-for="h in handles"
           :key="h"
           class="resize-handle"
           :class="`h-${h}`"
-          @mousedown.stop.prevent="startWindowResize($event, h)"
+          @mousedown.stop.prevent
+          @pointerdown.prevent="onHandlePointerDown($event, h)"
         ></div>
       </div>
   </div>

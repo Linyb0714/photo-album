@@ -1,6 +1,14 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { CarouselSettings, AppSettings, MenuState, FrameStyle } from '@/types';
+import type {
+  CarouselSettings,
+  AppSettings,
+  MenuState,
+  FrameStyle,
+  FrameSizeSettings,
+  FrameSizeOrientation,
+} from '@/types';
+import { findPresetById } from '@/data/photoSizes';
 
 export const useSettingsStore = defineStore('settings', () => {
   const settings = ref<AppSettings>({
@@ -17,7 +25,21 @@ export const useSettingsStore = defineStore('settings', () => {
     theme: 'dark',
     orientation: 'auto',
     portraitFitMode: 'ken-burns',
+    // presetId 默认 null = 不动窗口，避免首次启动就改变窗口尺寸
+    frameSize: { presetId: null, orientation: 'landscape', lockAspect: false },
   });
+
+  /**
+   * 当前窗口内容区的逻辑尺寸。
+   * **刻意放在 settings 之外，不持久化**：它是显示器相关的运行时状态，
+   * 存下来会在换屏/换 DPI 后恢复出一个离谱的窗口尺寸。
+   * 同样也因此不会被 App.vue 的持久化 watch 观察到。
+   */
+  const frameViewport = ref<{ width: number; height: number } | null>(null);
+
+  function setFrameViewport(width: number, height: number) {
+    frameViewport.value = { width, height };
+  }
 
   /**
    * 轮播暂停状态（都不持久化）：
@@ -61,6 +83,15 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.theme) settings.value.theme = data.theme;
     if (data.orientation) settings.value.orientation = data.orientation;
     if (data.portraitFitMode) settings.value.portraitFitMode = data.portraitFitMode;
+    // 用对象展开而不是逐字段真值判断：frameSize 里既有 false 又有 null，
+    // 沿用上面的 `if (data.x)` 写法会把它们丢掉
+    if (data.frameSize) {
+      settings.value.frameSize = { ...settings.value.frameSize, ...data.frameSize };
+      // 兼容持久化数据里已被删除的预设 id
+      if (settings.value.frameSize.presetId && !findPresetById(settings.value.frameSize.presetId)) {
+        settings.value.frameSize.presetId = null;
+      }
+    }
     console.log('[SettingsStore] 💾 已恢复持久化设置');
   }
 
@@ -75,6 +106,23 @@ export const useSettingsStore = defineStore('settings', () => {
   /** 更新相框风格（同时兼容旧的 updateSettings 调用） */
   function setFrameStyle(style: FrameStyle) {
     settings.value.frameStyle = style;
+  }
+
+  /** 常规相框尺寸（窗口尺寸）：只存"意图"，实际像素尺寸不持久化 */
+  function setFrameSize(next: Partial<FrameSizeSettings>) {
+    settings.value.frameSize = { ...settings.value.frameSize, ...next };
+  }
+
+  function setFrameSizePreset(presetId: string | null) {
+    settings.value.frameSize.presetId = presetId;
+  }
+
+  function setFrameSizeOrientation(orientation: FrameSizeOrientation) {
+    settings.value.frameSize.orientation = orientation;
+  }
+
+  function setFrameLockAspect(lockAspect: boolean) {
+    settings.value.frameSize.lockAspect = lockAspect;
   }
 
   function showMenu(position: 'left' | 'right' = 'left') {
@@ -111,6 +159,8 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     settings,
     menuState,
+    frameViewport,
+    setFrameViewport,
     carouselPaused,
     carouselHold,
     carouselStopped,
@@ -120,6 +170,10 @@ export const useSettingsStore = defineStore('settings', () => {
     updateSettings,
     updateCarousel,
     setFrameStyle,
+    setFrameSize,
+    setFrameSizePreset,
+    setFrameSizeOrientation,
+    setFrameLockAspect,
     showMenu,
     hideMenu,
     toggleMenu,
