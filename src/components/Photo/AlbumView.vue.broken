@@ -1,0 +1,537 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { useAlbumStore } from '@/stores/album';
+import { useSettingsStore } from '@/stores/settings';
+import PhotoItem from './PhotoItem.vue';
+
+const albumStore = useAlbumStore();
+const settingsStore = useSettingsStore();
+
+const props = defineProps<{
+  // 不再需要 props
+}>();
+
+const emit = defineEmits<{
+  // 不再需要 events
+}>();
+
+// 处理照片点击
+
+// 处理喜爱
+const handleFavorite = (photo: any, isFavorite: boolean) => {
+  albumStore.toggleFavorite(photo.id);
+  console.log(isFavorite ? '收藏' : '取消收藏', photo.name);
+};
+
+// 根据方向过滤照片
+const filteredPhotos = computed(() => {
+  const orientation = settingsStore.settings.orientation;
+  if (orientation === 'auto') {
+    return albumStore.currentPhotos;
+  }
+  
+  return albumStore.currentPhotos.filter(photo => {
+    const isLandscape = photo.aspectRatio > 1;
+    const isPortrait = photo.aspectRatio < 1;
+    
+    if (orientation === 'landscape') {
+      return isLandscape;
+    } else if (orientation === 'portrait') {
+      return isPortrait;
+    }
+    return true;
+  });
+});
+
+const photos = computed(() => filteredPhotos.value);
+const currentTemplate = computed(() => settingsStore.settings.frameTemplate);
+
+// 幻灯片状态
+const currentIndex = ref(0);
+const isSliding = ref(false);
+let slideTimer: number | null = null;
+
+// 等待提示状态
+const showWaitingPrompt = ref(false);
+const countdown = ref(0);
+let waitingTimer: number | null = null;
+let countdownTimer: number | null = null;
+let resetTimer: number | null = null;
+const WAITING_THRESHOLD = 30;
+const COUNTDOWN_DURATION = 15;
+// 等待提示状态
+// 计算显示模式
+const isCarouselMode = computed(() => {
+  return settingsStore.settings.carousel.enabled && photos.value.length > 0;
+});
+
+// 开始/停止幻灯片
+const startCarousel = () => {
+  if (photos.value.length <= 1) return;
+  
+  // 清除等待计时器
+  clearWaitingTimer();
+  
+  isSliding.value = true;
+  const interval = settingsStore.settings.carousel.interval;
+  
+  slideTimer = window.setInterval(() => {
+    nextSlide();
+  }, interval) as unknown as number;
+};
+
+const stopCarousel = () => {
+  isSliding.value = false;
+  if (slideTimer) {
+    clearInterval(slideTimer);
+    slideTimer = null;
+  }
+  
+  // 启动等待计时
+  resetWaitingCounter();
+};
+
+// 清除所有等待相关定时器
+const clearWaitingTimer = () => {
+  if (resetTimer) {
+    clearTimeout(resetTimer);
+    resetTimer = null;
+  }
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  if (waitingTimer) {
+    clearInterval(waitingTimer);
+    waitingTimer = null;
+  }
+  showWaitingPrompt.value = false;
+  countdown.value = 0;
+};
+
+// 重置等待计数器（防抖机制）
+const resetWaitingCounter = () => {
+  if (!settingsStore.settings.carousel.enabled || !settingsStore.settings.carousel.autoPlayAfterIdle) return;
+  
+  // 清除之前的定时器
+  if (resetTimer) {
+    clearTimeout(resetTimer);
+  }
+  
+  // 清除当前显示的提示和倒计时
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  showWaitingPrompt.value = false;
+  countdown.value = 0;
+  
+  // 设置新的定时器：30 秒无操作后开始提示
+  resetTimer = setTimeout(() => {
+    if (isSliding.value || !settingsStore.settings.carousel.enabled) return;
+    
+    // 开始显示提示和倒计时
+    showWaitingPrompt.value = true;
+    countdown.value = COUNTDOWN_DURATION;
+    
+    // 启动倒计时计时器
+    countdownTimer = window.setInterval(() => {
+      countdown.value--;
+      if (countdown.value <= 0) {
+        // 倒计时结束，开始播放
+        showWaitingPrompt.value = false;
+        startCarousel();
+      }
+    }, 1000) as unknown as number;
+  }, WAITING_THRESHOLD * 1000);
+};
+
+const nextSlide = () => {
+  currentIndex.value = (currentIndex.value + 1) % photos.value.length;
+  resetWaitingCounter();
+};
+const prevSlide = () => {
+  currentIndex.value = currentIndex.value === 0 
+    ? photos.value.length - 1 
+    : currentIndex.value - 1;
+  resetWaitingCounter();
+};
+// 监听轮播设置变化
+watch(() => settingsStore.settings.carousel.enabled, (enabled) => {
+  if (enabled) {
+    startCarousel();
+    resetWaitingCounter();
+  } else {
+    stopCarousel();
+    clearWaitingTimer();
+  }
+});
+
+// 监听照片变化
+watch(photos, (newPhotos) => {
+  if (newPhotos.length > 0) {
+    currentIndex.value = 0;
+    if (settingsStore.settings.carousel.enabled) {
+      startCarousel();
+      resetWaitingCounter();
+    }
+  } else {
+    stopCarousel();
+    clearWaitingTimer();
+  }
+});
+
+// 组件卸载时清理
+onUnmounted(() => {
+  stopCarousel();
+  clearWaitingTimer();
+});
+
+// 键盘控制
+const handleKeyDown = (e: KeyboardEvent) => {
+  // ESC 键取消倒计时或停止播放
+  if (e.key === 'Escape') {
+    if (showWaitingPrompt.value) {
+      // 取消倒计时
+      showWaitingPrompt.value = false;
+      countdown.value = 0;
+      if (waitingTimer) {
+        clearInterval(waitingTimer);
+        waitingTimer = null;
+      }
+    } else if (isSliding.value) {
+      // 停止播放
+      stopCarousel();
+    }
+    return;
+  }
+  
+  if (e.key === 'ArrowLeft') {
+    prevSlide();
+  } else if (e.key === 'ArrowRight') {
+    nextSlide();
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    if (isSliding.value) {
+      stopCarousel();
+    } else {
+      startCarousel();
+    }
+  }
+};
+
+onMounted(() => {
+  document.addEventListener('keydown', handleKeyDown);
+  if (photos.value.length > 0 && settingsStore.settings.carousel.enabled) {
+    startCarousel();
+    resetWaitingCounter();
+  }
+});
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeyDown);
+  clearWaitingTimer();
+});
+</script>
+
+<template>
+  <div class="relative w-full h-full overflow-hidden">
+    <!-- 等待提示和倒计时 -->
+    <div 
+      v-if="showWaitingPrompt && photos.length > 0"
+      class="absolute inset-0 flex items-center justify-center z-50 bg-black/60 backdrop-blur-sm cursor-pointer"
+      @click="showWaitingPrompt = false"
+    >
+      <div class="text-center text-white animate-pulse">
+        <div class="text-2xl mb-4">即将播放相册</div>
+        <div class="text-6xl font-bold mb-4">{{ countdown }}</div>
+        <div class="text-sm text-gray-300">秒</div>
+        <div class="mt-6 text-sm text-gray-400">
+          按 ESC 或点击空白处取消
+        </div>
+      </div>
+    </div>
+
+    <!-- 幻灯片模式：单张或少数几张大图展示 -->
+    <div v-if="isCarouselMode && photos.length > 0" class="relative w-full h-full">
+      <!-- 当前照片（带过渡动画） -->
+      <div class="absolute inset-0 flex items-center justify-center p-8">
+        <div class="relative w-full h-full flex items-center justify-center">
+          <transition
+            name="slide-fade"
+            mode="out-in"
+          >
+            <div
+              :key="photos[currentIndex].id"
+              class="relative w-full h-full flex items-center justify-center"
+            >
+              <PhotoItem
+                :photo="photos[currentIndex]"
+                :selected-index="currentIndex"
+                :index="currentIndex"
+                class="max-w-full max-h-full"
+                
+                
+                @favorite="handleFavorite"
+              />
+            </div>
+          </transition>
+        </div>
+      </div>
+
+      <!-- 导航箭头 -->
+      <button
+        @click.stop="prevSlide()"
+        class="absolute left-4 top-1/2 transform -translate-y-1/2 p-3 bg-black/50 hover:bg-black/70 rounded-full text-white transition-all z-20"
+      >
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+        </svg>
+      </button>
+
+      <button
+        @click.stop="nextSlide()"
+        class="absolute right-4 top-1/2 transform -translate-y-1/2 p-3 bg-black/50 hover:bg-black/70 rounded-full text-white transition-all z-20"
+      >
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+        </svg>
+      </button>
+
+      <!-- 底部进度条（晨光风格 + 呼吸动画） -->
+      <div class="absolute bottom-6 left-1/2 transform -translate-x-1/2 w-1/3 h-0.5 rounded-full overflow-hidden z-20"
+           style="
+             background: linear-gradient(to right, 
+               transparent 0%, 
+               rgba(135, 170, 200, 0.25) 15%, 
+               rgba(135, 170, 200, 0.35) 50%, 
+               rgba(135, 170, 200, 0.25) 85%, 
+               transparent 100%
+             );
+             box-shadow: 0 0 4px rgba(135, 170, 200, 0.2);
+             animation: breathe 3s ease-in-out infinite;
+           ">
+        <div class="h-full transition-all duration-500 ease-out"
+             :style="{ width: `${(currentIndex + 1) / photos.length * 100}%` }"
+             style="
+               background: linear-gradient(90deg, 
+                 rgba(255, 255, 255, 0.6) 0%, 
+                 rgba(255, 255, 255, 0.9) 20%, 
+                 rgba(255, 255, 255, 1) 50%, 
+                 rgba(255, 255, 255, 0.9) 80%, 
+                 rgba(255, 255, 255, 0.6) 100%
+               );
+               box-shadow: 
+                 0 0 6px rgba(255, 255, 255, 0.8),
+                 0 0 12px rgba(255, 255, 255, 0.5),
+                 0 0 18px rgba(255, 255, 255, 0.3),
+                 inset 0 0 3px rgba(255, 255, 255, 0.6);
+             ">
+        </div>
+      </div>
+
+      <!-- 计数器 -->
+      <div class="absolute bottom-4 right-4 text-white/80 text-sm bg-black/50 px-3 py-1 rounded z-20">
+        {{ currentIndex + 1 }} / {{ photos.length }}
+      </div>
+    </div>
+
+    <!-- 画廊模式：3 张重点展示（1 张大图 + 2 张小图） -->
+    <div v-else-if="['gallery', 'collage'].includes(currentTemplate) && photos.length > 0" class="relative w-full h-full p-6">
+      <div class="grid grid-cols-3 grid-rows-2 gap-4 h-full">
+        <!-- 主照片（占据 2 列 2 行） -->
+        <div class="col-span-2 row-span-2 relative overflow-hidden rounded-lg">
+          <PhotoItem
+            :photo="photos[0]"
+            
+            :index="0"
+            class="w-full h-full object-cover"
+            
+            
+            @favorite="handleFavorite"
+          />
+        </div>
+
+        <!-- 副照片 1 -->
+        <div class="relative overflow-hidden rounded-lg">
+          <PhotoItem
+            :photo="photos[1] || photos[0]"
+            
+            :index="1"
+            class="w-full h-full object-cover"
+            
+            
+            @favorite="handleFavorite"
+          />
+        </div>
+
+        <!-- 副照片 2 -->
+        <div class="relative overflow-hidden rounded-lg">
+          <PhotoItem
+            :photo="photos[2] || photos[0]"
+            
+            :index="2"
+            class="w-full h-full object-cover"
+            
+            
+            @favorite="handleFavorite"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- 其他模版：使用原有布局 -->
+    <div v-else class="relative w-full h-full p-8">
+      <!-- 网格布局（可滚动） -->
+      <div 
+        v-if="['grid', 'masonry'].includes(currentTemplate)"
+        class="relative w-full h-full"
+      >
+        <!-- 滚动容器 -->
+        <div class="absolute inset-0 overflow-y-auto pr-2 custom-scrollbar">
+          <div class="grid gap-4" :style="{
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gridTemplateRows: 'repeat(auto, 1fr)',
+            minHeight: '100%',
+            paddingBottom: '2rem'
+          }">
+            <PhotoItem
+              v-for="(photo, index) in photos"
+              :key="photo.id"
+              :photo="photo"
+              
+              :index="index"
+              class="rounded-lg overflow-hidden"
+              
+              
+              @favorite="handleFavorite"
+            />
+          </div>
+        </div>
+
+        <!-- 滚动引导提示（当照片超过 6 张时显示） -->
+        <div 
+          v-if="photos.length > 6"
+          class="absolute bottom-4 left-1/2 transform -translate-x-1/2 flex items-center gap-2 bg-gray-800/90 backdrop-blur-sm px-4 py-2 rounded-full z-10"
+        >
+          <svg class="w-4 h-4 text-gray-400 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+          <span class="text-gray-300 text-xs">向下滚动查看更多 ({{ photos.length }} 张)</span>
+        </div>
+      </div>
+
+      <!-- 时间轴 -->
+      <div v-else-if="currentTemplate === 'timeline'" class="flex items-center justify-center h-full">
+        <div class="flex gap-4 overflow-x-auto max-w-full px-4">
+          <PhotoItem
+            v-for="(photo, index) in photos.slice(0, 10)"
+            :key="photo.id"
+            :photo="photo"
+            
+            :index="index"
+            class="flex-shrink-0 w-48 h-64 rounded-lg overflow-hidden"
+            
+            
+            @favorite="handleFavorite"
+          />
+        </div>
+      </div>
+
+      <!-- 杂志布局 -->
+      <div v-else-if="currentTemplate === 'magazine'" class="grid grid-cols-2 gap-4 h-full p-4">
+        <div class="relative overflow-hidden rounded-lg">
+          <PhotoItem
+            :photo="photos[0]"
+            
+            :index="0"
+            class="w-full h-full object-cover"
+            
+            
+            @favorite="handleFavorite"
+          />
+        </div>
+        <div class="grid grid-rows-2 gap-4">
+          <div class="relative overflow-hidden rounded-lg">
+            <PhotoItem
+              :photo="photos[1]"
+              
+              :index="1"
+              class="w-full h-full object-cover"
+              
+              
+              @favorite="handleFavorite"
+            />
+          </div>
+          <div class="relative overflow-hidden rounded-lg">
+            <PhotoItem
+              :photo="photos[2]"
+              
+              :index="2"
+              class="w-full h-full object-cover"
+              
+              
+              @favorite="handleFavorite"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 空状态 -->
+    <div v-if="photos.length === 0" class="flex items-center justify-center h-full">
+      <div class="text-center text-gray-500">
+        <p class="text-lg">暂无照片</p>
+        <p class="text-sm mt-2">点击菜单添加照片</p>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/* 幻灯片切换动画：渐入渐出 + 轻微缩放 */
+.slide-fade-enter-active,
+.slide-fade-leave-active {
+  transition: all 0.6s ease;
+}
+
+.slide-fade-enter-from {
+  opacity: 0;
+  transform: scale(0.95) translateX(30px);
+}
+
+.slide-fade-leave-to {
+  opacity: 0;
+  transform: scale(1.05) translateX(-30px);
+}
+
+/* 画廊模式过渡 */
+.gallery-enter-active,
+.gallery-leave-active {
+  transition: all 0.5s ease;
+}
+
+.gallery-enter-from,
+.gallery-leave-to {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+/* 呼吸动画效果 */
+@keyframes breathe {
+  0%, 100% {
+    opacity: 0.6;
+    box-shadow: 0 0 4px rgba(135, 170, 200, 0.2);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 8px rgba(135, 170, 200, 0.4);
+  }
+}
+
+/* 自定义滚动条 */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {

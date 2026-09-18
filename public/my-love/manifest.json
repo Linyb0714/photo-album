@@ -1,0 +1,16 @@
+{
+  "name": "爱你❤️",
+  "description": "记录我们的每一帧心动时光",
+  "items": [
+    { "file": "love_01.jpg", "type": "image" },
+    { "file": "love_02.jpg", "type": "image" },
+    { "file": "love_03.jpg", "type": "image" },
+    { "file": "love_04.png", "type": "image" },
+    { "file": "love_05.png", "type": "image" },
+    { "file": "love_06.jpg", "type": "image" },
+    { "file": "love_07.jpg", "type": "image" },
+    { "file": "love_08.jpg", "type": "image" },
+    { "file": "love_09.jpg", "type": "image" },
+    { "file": "love_video_01.mp4", "type": "video" }
+  ]
+}

@@ -1,0 +1,186 @@
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import type { Photo } from '@/types';
+import { useAlbumStore } from '@/stores/album';
+
+const props = defineProps<{
+  photo: Photo & { color?: string; url?: string };
+  index: number;
+}>();
+
+const emit = defineEmits<{
+  (e: 'click', photo: Photo): void;
+  (e: 'favorite', photo: Photo, isFavorite: boolean): void;
+}>();
+
+const albumStore = useAlbumStore();
+
+const imageLoaded = ref(false);
+const imageError = ref(false);
+const isImageLoading = ref(true);
+
+// 周杰伦相关的话语
+const quotes = [
+  "最美的不是下雨天，是曾与你躲过雨的屋檐",
+  "而我已经分不清，你是友情，还是错过的爱情",
+  "最美的不是下雨天，是曾与你躲过雨的屋檐",
+  "天青色等烟雨，而我在等你",
+  "乘着风游荡在蓝天边，一片云掉落在我面前",
+  "我送你离开，千里之外，你无声黑白",
+  "从前从前，有个人爱你很久",
+  "故事的小黄花，从出生那年就飘着",
+  "雨下整夜，我的爱溢出就像雨水",
+  "转身离开，分手说不出来",
+  "听妈妈的话，别让她受伤",
+  "最美的不是下雨天，是曾与你躲过雨的屋檐",
+  "缓缓飘落的枫叶像思念，我点燃烛火温暖岁末的秋天",
+  "我一路向北，离开有你的季节",
+  "你的美，已经给了谁，追了又追，我要不回",
+];
+const handleClick = (e: MouseEvent) => {
+  if ((e.target as HTMLElement).closest('.favorite-btn')) {
+    return;
+  }
+  emit('click', props.photo);
+};
+
+const handleFavorite = (e: MouseEvent) => {
+  e.stopPropagation();
+  const isFavorite = !props.photo.isFavorite;
+  albumStore.toggleFavorite(props.photo.id);
+  emit('favorite', props.photo, isFavorite);
+};
+
+const loadHighResolution = () => {
+  if (!props.photo.url) {
+    isImageLoading.value = false;
+    return;
+  }
+  
+  console.log('[PhotoItem] 加载高清图:', props.photo.name);
+  
+  const loadTimeout = setTimeout(() => {
+    if (!imageLoaded.value) {
+      console.warn('[PhotoItem] 高清图加载超时，使用低分辨率:', props.photo.name);
+      isImageLoading.value = false;
+    }
+  }, 5000);
+  
+  const highResImg = new Image();
+  highResImg.onload = () => {
+    clearTimeout(loadTimeout);
+    console.log('[PhotoItem] 高清图加载成功:', props.photo.name);
+    imageLoaded.value = true;
+    showLowResolution.value = false;
+    isImageLoading.value = false;
+  };
+  highResImg.onerror = () => {
+    clearTimeout(loadTimeout);
+    console.warn('[PhotoItem] 高清图加载失败:', props.photo.name);
+    imageError.value = true;
+    isImageLoading.value = false;
+  };
+  highResImg.src = props.photo.url;
+};
+
+onMounted(() => {
+  console.log('[PhotoItem] 初始化:', props.photo.name);
+  
+  if (props.photo.thumbnail) {
+    const thumbnailImg = new Image();
+    thumbnailImg.src = props.photo.thumbnail;
+    thumbnailImg.onload = () => {
+      console.log('[PhotoItem] 缩略图加载成功:', props.photo.name);
+      isThumbnailLoaded.value = true;
+      showLowResolution.value = true;
+      isImageLoading.value = false;
+    };
+    thumbnailImg.onerror = () => {
+      console.warn('[PhotoItem] 缩略图加载失败，尝试直接加载高清图:', props.photo.name);
+      loadHighResolution();
+    };
+  } else {
+    loadHighResolution();
+  }
+});
+</script>
+<template>
+  <div
+    class="relative overflow-hidden rounded-lg cursor-pointer flex items-center justify-center w-full h-full bg-gray-900 group"
+    @click="handleClick"
+    :style="{
+      aspectRatio: `${photo.width} / ${photo.height}`,
+    }"
+  >
+    <!-- 加载状态 -->
+    <div v-if="isImageLoading" class="absolute inset-0 flex items-center justify-center bg-gray-800">
+      <div class="animate-spin rounded-full h-12 w-12 border-4 border-white/30 border-t-white"></div>
+    </div>
+
+    <!-- 加载失败显示占位 -->
+    <div v-if="!isImageLoading && imageError" class="absolute inset-0 flex items-center justify-center bg-gray-800">
+      <p class="text-gray-600 text-sm">图片加载失败</p>
+    </div>
+
+    <!-- 无图片时显示灰色背景 -->
+    <div v-if="!isImageLoading && !photo.url && !imageError" class="absolute inset-0 flex items-center justify-center bg-gray-800">
+      <p class="text-gray-600 text-sm">等待加载</p>
+    </div>
+
+    <!-- 实际图片 -->
+    <img
+      v-if="!isImageLoading && photo.url && !imageError"
+      :src="showLowResolution && photo.thumbnail ? photo.thumbnail : photo.url"
+      :alt="photo.name"
+      class="absolute inset-0 w-full h-full object-cover"
+      :style="{
+        opacity: imageLoaded || showLowResolution ? 1 : 0,
+        transition: 'opacity 0.5s ease-in-out'
+      }"
+      @error="imageError = true"
+    />
+
+    <!-- 悬停信息显示（仅底部文字） -->
+    <div 
+      v-if="!isImageLoading && !imageError && photo.url"
+      class="absolute bottom-0 left-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+      style="background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);"
+    >
+      <!-- 底部主题话语 -->
+      <p class="text-yellow-400 text-sm font-medium italic text-center mb-2">
+        "{{ getQuote() }}"
+      </p>
+      
+      <!-- 照片信息 -->
+      <div class="flex items-center justify-between text-xs text-gray-300">
+        <span>{{ photo.name }}</span>
+        <span>{{ photo.width }} × {{ photo.height }}</span>
+      </div>
+      
+      <!-- 喜爱按钮 -->
+      <button
+        @click.stop="handleFavorite"
+        class="absolute top-2 right-2 p-2 rounded-full bg-black/50 hover:bg-black/70 transition-colors favorite-btn"
+        :title="photo.isFavorite ? '取消收藏' : '收藏'"
+      >
+        <svg 
+          class="w-4 h-4" 
+          :class="photo.isFavorite ? 'text-red-500 fill-red-500' : 'text-white'"
+          fill="none" 
+          stroke="currentColor" 
+          viewBox="0 0 24 24"
+        >
+          <path 
+            stroke-linecap="round" 
+            stroke-linejoin="round" 
+            stroke-width="2" 
+            d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" 
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+</style>
