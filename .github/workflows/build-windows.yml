@@ -1,6 +1,5 @@
 name: Build Windows Installer
 
-# 手动触发；推 main 或推 tag 时也会自动构建
 on:
   workflow_dispatch:
   push:
@@ -32,15 +31,31 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # 显式带上 dev 依赖（@tauri-apps/cli 在 devDependencies 里），并打印诊断信息
       - name: Install frontend deps
-        run: npm ci || npm install
+        shell: bash
+        run: |
+          node -v
+          npm -v
+          npm ci --include=dev || npm install --include=dev
+          echo "--- node_modules/.bin 里的 tauri ---"
+          ls node_modules/.bin | grep -i tauri || echo "!! 未找到 tauri 可执行文件"
+          echo "--- @tauri-apps/cli 解析结果 ---"
+          npm ls @tauri-apps/cli || true
 
-      # 单独一步：前端构建失败时一眼能看出是这里
       - name: Build frontend
+        shell: bash
         run: npm run build
 
+      # 直接用 CLI 的入口文件，避免依赖 PATH / .bin 解析
       - name: Build Windows installer (NSIS)
-        run: npm run tauri build -- --bundles nsis
+        shell: bash
+        run: |
+          if [ -f node_modules/@tauri-apps/cli/tauri.js ]; then
+            node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis
+          else
+            npm run tauri build -- --bundles nsis
+          fi
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
