@@ -32,16 +32,35 @@ jobs:
           workspaces: src-tauri
 
       # 显式带上 dev 依赖（@tauri-apps/cli 在 devDependencies 里），并打印诊断信息
+      # 注意：这里不能用 `|| npm install` 兜底。npm 失败时只会打印 "Exit handler never called!"，
+      # 真实原因（如 registry 不可达导致的 ETIMEDOUT）只写在 <cache>/_logs 的 debug log 里，
+      # 兜底既会把真实错误盖掉，又会把失败耗时翻倍。
       - name: Install frontend deps
         shell: bash
         run: |
           node -v
           npm -v
-          npm ci --include=dev || npm install --include=dev
+          npm config get registry
+          npm ci --include=dev --no-audit --no-fund
           echo "--- node_modules/.bin 里的 tauri ---"
           ls node_modules/.bin | grep -i tauri || echo "!! 未找到 tauri 可执行文件"
           echo "--- @tauri-apps/cli 解析结果 ---"
           npm ls @tauri-apps/cli || true
+
+      # npm 的报错信息常常与真实原因无关，失败时把 debug log 打出来
+      - name: Dump npm debug logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== npm registry ==="
+          npm config get registry
+          CACHE_DIR="$(npm config get cache | tr '\\' '/')"
+          echo "=== npm cache: $CACHE_DIR ==="
+          for f in "$CACHE_DIR"/_logs/*debug-0.log; do
+            [ -f "$f" ] || continue
+            echo "----- $f -----"
+            grep -iE "error|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|attempt .* failed|http fetch" "$f" | tail -60 || true
+          done
 
       - name: Build frontend
         shell: bash
