@@ -1,15 +1,17 @@
 name: Build Windows Installer
 
-# 手动触发，或推 tag 时触发
+# 手动触发；推 main 或推 tag 时也会自动构建
 on:
   workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      RUST_BACKTRACE: 1
 
     steps:
       - name: Checkout
@@ -18,7 +20,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -31,7 +33,11 @@ jobs:
           workspaces: src-tauri
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci || npm install
+
+      # 单独一步：前端构建失败时一眼能看出是这里
+      - name: Build frontend
+        run: npm run build
 
       - name: Build Windows installer (NSIS)
         run: npm run tauri build -- --bundles nsis
