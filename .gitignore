@@ -16,6 +16,10 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 
+# 个人相册素材：只留在本机，不提交、也不打进安装包
+# （删掉这行即可让「爱你❤️」相册随代码一起发布）
+public/my-love/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
